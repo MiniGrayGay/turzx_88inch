@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
@@ -28,6 +30,16 @@ import (
 )
 
 const maxImageUploadBytes = 64 << 20
+
+// Stable identity fields so a discovery program can probe any entry point
+// (Named Pipe / Unix socket / HTTP /) and recognize this is the Turing 8.8-inch
+// screen interface it wants to talk to.
+const (
+	serviceName        = "turing88 driver"
+	serviceDevice      = "Turing Smart Screen 8.8inch (Rev C)"
+	serviceInterface   = "ct88inch"
+	serviceDescription = "Turing 8.8 寸便携屏驱动通信接口 / Turing 8.8-inch portable screen driver interface"
+)
 
 type rpcValue struct {
 	present bool
@@ -86,6 +98,9 @@ type rpcResponse struct {
 }
 
 type serviceStatus struct {
+	Device         string `json:"device"`
+	Interface      string `json:"interface"`
+	Description    string `json:"description"`
 	Initialized    bool   `json:"initialized"`
 	ConfiguredPort string `json:"configured_port"`
 	Port           string `json:"port"`
@@ -134,7 +149,7 @@ func runServer(listen, pipeName, unixSocketPath, port string, brightness int, or
 	if err := service.initialize(reset); err != nil {
 		return err
 	}
-	localRPCEndpoint, err := startLocalRPC(service, pipeName, unixSocketPath)
+	localRPCEndpoint, localRPCCloser, err := startLocalRPC(service, pipeName, unixSocketPath)
 	if err != nil {
 		return err
 	}
@@ -146,12 +161,15 @@ func runServer(listen, pipeName, unixSocketPath, port string, brightness int, or
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"name":      "turing88 driver",
-			"local_rpc": localRPCEndpoint,
-			"rpc":       "POST /rpc | WebSocket /rpc（GET /rpc 返回请求格式）",
-			"image":     "POST /image（GET /image 返回请求格式）",
-			"status":    "GET /status",
-			"ports":     "GET /ports",
+			"name":        serviceName,
+			"device":      serviceDevice,
+			"interface":   serviceInterface,
+			"description": serviceDescription,
+			"local_rpc":   localRPCEndpoint,
+			"rpc":         "POST /rpc | WebSocket /rpc（GET /rpc 返回请求格式）",
+			"image":       "POST /image（GET /image 返回请求格式）",
+			"status":      "GET /status",
+			"ports":       "GET /ports",
 		})
 	})
 	mux.HandleFunc("/rpc", func(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +210,9 @@ func runServer(listen, pipeName, unixSocketPath, port string, brightness int, or
 		writeJSON(w, http.StatusOK, rpcResponse{OK: true, Action: "ports", Ports: ports, Status: service.status()})
 	})
 
+	srv := &http.Server{Handler: mux}
+	installGracefulShutdown(srv, service, localRPCCloser)
+
 	fmt.Printf("driver ready: port=%s id=%s rom=%d native=%dx%d format=BGRA\n",
 		service.status().Port,
 		service.status().DisplayID,
@@ -203,7 +224,61 @@ func runServer(listen, pipeName, unixSocketPath, port string, brightness int, or
 		fmt.Printf("listening on local rpc %s\n", localRPCEndpoint)
 	}
 	fmt.Printf("listening on http://%s\n", httpEndpoint)
-	return http.Serve(httpListener, mux)
+
+	if err := srv.Serve(httpListener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// installGracefulShutdown wires OS termination signals (Ctrl-C, the Windows window-close
+// button, SIGTERM/SIGHUP/SIGQUIT/SIGTSTP on Unix) and, on an interactive terminal, stdin
+// EOF (Ctrl-D / Ctrl-Z) to a one-shot cleanup: stop the HTTP server, close the local RPC
+// entry point (and remove the unix socket file), release the serial port, then exit.
+func installGracefulShutdown(srv *http.Server, service *screenService, localRPCCloser func()) {
+	var once sync.Once
+	shutdown := func(reason string) {
+		once.Do(func() {
+			fmt.Printf("\nshutting down (%s), cleaning up...\n", reason)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(ctx)
+
+			if localRPCCloser != nil {
+				localRPCCloser()
+			}
+			service.shutdown()
+
+			fmt.Println("cleanup done, exiting")
+			os.Exit(0)
+		})
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, shutdownSignals()...)
+	go func() {
+		sig := <-sigCh
+		shutdown(sig.String())
+	}()
+
+	// Ctrl-D on a terminal closes stdin (EOF). Only watch it when stdin is an
+	// interactive terminal, so a detached/service start with redirected stdin does
+	// not exit immediately.
+	if stdinIsTerminal() {
+		go func() {
+			_, _ = io.Copy(io.Discard, os.Stdin)
+			shutdown("stdin EOF")
+		}()
+	}
+}
+
+func stdinIsTerminal() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 // routeFormat 描述某个 HTTP 路由的请求格式，GET 该路由时返回它，作为自说明文档。
@@ -724,6 +799,18 @@ func (s *screenService) displayAutoFitImage(img image.Image) (turing88.Orientati
 	return orientation, err
 }
 
+// shutdown releases the serial port so the OS frees the COM device for the next start.
+func (s *screenService) shutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.driver != nil {
+		_ = s.driver.Close()
+		s.driver = nil
+		s.initialized = false
+	}
+}
+
 func (s *screenService) withDriver(fn func(*turing88.Driver) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -746,6 +833,9 @@ func (s *screenService) status() *serviceStatus {
 	}
 
 	return &serviceStatus{
+		Device:         serviceDevice,
+		Interface:      serviceInterface,
+		Description:    serviceDescription,
 		Initialized:    s.initialized,
 		ConfiguredPort: s.configuredPort,
 		Port:           port,

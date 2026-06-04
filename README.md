@@ -39,6 +39,30 @@ http://127.0.0.1:60880
 
 如果 Named Pipe 或 Unix socket 已经被占用，服务会跳过这个本机 RPC 入口并继续运行。HTTP 端口如果被占用，会从配置端口开始自动向下递减，直到找到可用端口，例如 `60880` 被占用时尝试 `60879`。
 
+## 接口识别
+
+直接请求 Named Pipe、Unix socket 或 HTTP `/` 时，返回的 JSON 都带有固定的识别字段，方便调用方在多个串口 / 服务里判断“这是 Turing 8.8 寸屏幕的接口、是要通信的那个端口”：
+
+```json
+{
+  "device": "Turing Smart Screen 8.8inch (Rev C)",
+  "interface": "ct88inch",
+  "description": "Turing 8.8 寸便携屏驱动通信接口 / Turing 8.8-inch portable screen driver interface"
+}
+```
+
+- HTTP `GET /` 在路由索引里直接带这三个字段。
+- Named Pipe / Unix socket 没有“空连接响应”，发一条最简单的请求（例如 `{}` 或 `{"action":"status"}`）即可，返回的 `status` 对象里带 `device` / `interface` / `description`，同时 `display_id` 为 `chs_88inch...`。
+- `interface` 是稳定标识，推荐调用方用它（值固定为 `ct88inch`）做判断。
+
+## 退出与清理
+
+服务捕获常见的终止方式并在退出前自清理：关闭 HTTP 服务、注销本机 RPC 入口（Unix socket 会删除 socket 文件）、释放串口（COM / tty），然后退出。这样下次启动不会出现串口被上一个进程占用的情况。
+
+- Windows：`Ctrl-C`、`Ctrl-Break`，以及点击控制台窗口右上角的关闭按钮（X）/ 注销 / 关机。
+- Linux / 非 Windows：`Ctrl-C`（SIGINT）、`Ctrl-\`（SIGQUIT）、`Ctrl-Z`（SIGTSTP，这里被接管为退出而不是挂起）、`SIGTERM`、`SIGHUP`。
+- 交互式终端下，`Ctrl-D`（stdin EOF）也会触发退出。以重定向 / 服务方式启动（stdin 非终端）时不监听 stdin，避免一启动就退出。
+
 ## RPC 格式
 
 Named Pipe、Unix socket、HTTP POST 和 WebSocket 使用同一份 JSON 结构，字段参考根目录的 `sample.json`：

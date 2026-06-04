@@ -11,10 +11,10 @@ import (
 	"time"
 )
 
-func startLocalRPC(service *screenService, pipeName, unixSocketPath string) (string, error) {
+func startLocalRPC(service *screenService, pipeName, unixSocketPath string) (string, func(), error) {
 	unixSocketPath = strings.TrimSpace(unixSocketPath)
 	if unixSocketPath == "" {
-		return "", nil
+		return "", nil, nil
 	}
 	if strings.HasPrefix(unixSocketPath, "unix://") {
 		unixSocketPath = strings.TrimPrefix(unixSocketPath, "unix://")
@@ -23,20 +23,25 @@ func startLocalRPC(service *screenService, pipeName, unixSocketPath string) (str
 	ready, err := prepareUnixSocketPath(unixSocketPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "unix socket %s not registered: %v\n", unixSocketPath, err)
-		return "", nil
+		return "", nil, nil
 	}
 	if !ready {
-		return "", nil
+		return "", nil, nil
 	}
 
 	listener, err := net.Listen("unix", unixSocketPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "unix socket %s not registered: %v\n", unixSocketPath, err)
-		return "", nil
+		return "", nil, nil
 	}
 
 	go acceptLocalRPC(service, listener, unixSocketPath)
-	return "unix://" + unixSocketPath, nil
+	closer := func() {
+		// Closing a unix listener unlinks the socket file; remove again just in case.
+		_ = listener.Close()
+		_ = os.Remove(unixSocketPath)
+	}
+	return "unix://" + unixSocketPath, closer, nil
 }
 
 func prepareUnixSocketPath(path string) (bool, error) {

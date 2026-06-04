@@ -42,6 +42,8 @@ go/
     default_splash_test.go
     local_rpc_windows.go    Windows Named Pipe 入口（build tag: windows）
     local_rpc_unix.go       Linux / 非 Windows Unix socket 入口
+    signals_windows.go      Windows 终止信号清单（build tag: windows）
+    signals_unix.go         Linux / 非 Windows 终止信号清单
     server_test.go
   turing88/
     driver.go               串口协议驱动
@@ -124,6 +126,38 @@ go/cmd/turing88/default_splash.go
 ```
 
 运行时只解包内嵌 BGRA 数据并发送，不再解码 PNG，也不依赖 `4_1.png` 文件存在。
+
+## 接口识别
+
+为了让调用方在多个串口 / 服务里判断出“这是 Turing 8.8 寸屏幕的接口”，直接请求 Named Pipe、Unix socket、HTTP `/` 都会带固定识别字段：
+
+```text
+device      = Turing Smart Screen 8.8inch (Rev C)
+interface   = ct88inch
+description  = Turing 8.8 寸便携屏驱动通信接口 / Turing 8.8-inch portable screen driver interface
+```
+
+实现上这些是 `cmd/turing88/server.go` 里的常量，统一注入到：
+
+- HTTP `GET /` 的路由索引。
+- 所有 `status` 响应的 `status` 对象（HTTP `/status`、Named Pipe、Unix socket、WebSocket 都走同一份 `serviceStatus`）。
+
+Named Pipe / Unix socket 没有空连接响应，调用方发一条 `{}` 或 `{"action":"status"}` 即可拿到识别字段。`interface` 取值固定为 `ct88inch`，是推荐的稳定判断依据。
+
+## 退出与清理
+
+`runServer` 注册了 `installGracefulShutdown`，捕获终止信号后只执行一次清理：`http.Server.Shutdown` -> 关闭本机 RPC 入口（Unix socket 关闭即删除 socket 文件）-> `screenService.shutdown()` 释放串口 -> `os.Exit(0)`。释放串口是关键，避免下次启动出现 `COM busy` / tty 占用。
+
+信号清单按平台用 build tag 分开（`signals_windows.go` / `signals_unix.go`）：
+
+```text
+windows : os.Interrupt(Ctrl-C / Ctrl-Break), SIGTERM(窗口关闭按钮 X / 注销 / 关机)
+unix    : SIGINT(Ctrl-C), SIGQUIT(Ctrl-\), SIGTSTP(Ctrl-Z, 接管为退出), SIGTERM, SIGHUP
+```
+
+另外，只有当 stdin 是交互式终端（`os.ModeCharDevice`）时才监听 stdin EOF（`Ctrl-D` / Windows 控制台 `Ctrl-Z`）。以重定向 / 后台服务方式启动时 stdin 不是终端，不会因为 stdin 立即 EOF 而退出。
+
+`startLocalRPC` 现在返回一个 closer，交给优雅退出逻辑统一关闭。
 
 ## 自动串口识别
 

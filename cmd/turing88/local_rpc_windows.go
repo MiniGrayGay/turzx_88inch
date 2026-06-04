@@ -11,10 +11,10 @@ import (
 	"github.com/Microsoft/go-winio"
 )
 
-func startLocalRPC(service *screenService, pipeName, unixSocketPath string) (string, error) {
+func startLocalRPC(service *screenService, pipeName, unixSocketPath string) (string, func(), error) {
 	pipeName = strings.TrimSpace(pipeName)
 	if pipeName == "" {
-		return "", nil
+		return "", nil, nil
 	}
 
 	path := namedPipePath(pipeName)
@@ -24,11 +24,12 @@ func startLocalRPC(service *screenService, pipeName, unixSocketPath string) (str
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "named pipe %s not registered: %v\n", path, err)
-		return "", nil
+		return "", nil, nil
 	}
 
 	go acceptLocalRPC(service, listener, path)
-	return path, nil
+	closer := func() { _ = listener.Close() }
+	return path, closer, nil
 }
 
 func acceptLocalRPC(service *screenService, listener net.Listener, path string) {
