@@ -216,7 +216,14 @@ HTTP 图片快捷入口：
 POST http://127.0.0.1:60880/image
 ```
 
-`/image` 不走 JSON RPC 包装，支持直接 POST 图片二进制，也支持 `multipart/form-data`。multipart 中任意字段都可以放文件、`data:image/...;base64,...`、`base64:...` 或纯 base64 图片文本；如果有多个字段，按读取顺序使用第一个能解码成图片的字段。坐标通过 query string 传，支持 `x` / `y` 或 `position_X` / `position_Y`，缺省为 `0,0`。
+`/image` 不走 JSON RPC 包装，支持直接 POST 图片二进制，也支持 `multipart/form-data`。multipart 中任意字段都可以放文件、`data:image/...;base64,...`、`base64:...` 或纯 base64 图片文本；如果有多个字段，按读取顺序使用第一个能解码成图片的字段。坐标通过 query string 传，支持 `x` / `y` 或 `position_X` / `position_Y`。
+
+`/image` 有两种模式：
+
+- 不带坐标：整屏自适应。按宽高比判断方向，竖图（高 ≥ 宽）保持 `native` 不旋转，横图（宽 > 高）把方向设为 `landscape` 并旋转；长边缩放到 `1920`，短边居中裁剪到填满，按全屏刷新发送。横图走的是驱动 `DisplayImage` 的旋转入口（软件旋转，和默认开机画面的旋转方式一致）。
+- 带坐标（`x` / `y`）：原生竖屏坐标局部刷新，不缩放、不旋转，越界自动裁剪。
+
+整屏自适应用的是 `golang.org/x/image/draw` 的 `CatmullRom` 缩放 + 居中裁剪（cover）。对正常横图等价于“长边到 1920、短边取中间”，对极端宽高比则按覆盖整屏处理，保证不留黑边。
 
 WebSocket 调试入口：
 

@@ -165,9 +165,21 @@ Invoke-RestMethod -Method POST `
   -Body '{"action":"update","image":".\\tmp\\small.png","position_X":120,"position_Y":40}'
 ```
 
-HTTP 也提供一个只用于图片上传的快捷入口 `POST /image`，不需要 JSON RPC 包装。坐标通过 query string 传，`x` / `y` 和 `position_X` / `position_Y` 都支持；缺省时按 `0,0` 处理。图片超出屏幕范围的部分会直接裁剪。
+HTTP 也提供一个只用于图片上传的快捷入口 `POST /image`，不需要 JSON RPC 包装。它有两种模式：
 
-直接 POST 图片二进制：
+- **不带坐标（整屏自适应）**：按宽高比判断方向，任意尺寸图片都会被填满整屏。竖图（高 ≥ 宽）保持 `native` 方向不旋转；横图（宽 > 高）自动把方向设为 `landscape` 并旋转。缩放规则是长边缩放到 `1920`，短边居中裁剪到填满，多余部分裁掉。
+- **带坐标（局部刷新）**：传了 `x` / `y`（或 `position_X` / `position_Y`）时按原生竖屏坐标做局部刷新，不缩放、不旋转；图片超出 `480x1920` 的部分自动裁剪。
+
+整屏自适应，直接 POST 一张照片（横图自动转 landscape）：
+
+```powershell
+Invoke-RestMethod -Method POST `
+  -Uri http://127.0.0.1:60880/image `
+  -ContentType "image/png" `
+  -InFile .\tmp\photo.png
+```
+
+局部刷新，直接 POST 图片二进制并带坐标：
 
 ```powershell
 Invoke-RestMethod -Method POST `

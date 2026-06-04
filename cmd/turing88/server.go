@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/draw"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"unicode"
 
 	"github.com/gorilla/websocket"
+	xdraw "golang.org/x/image/draw"
 
 	"turing-smart-screen-go/turing88"
 )
@@ -258,13 +260,14 @@ func imageRouteFormat() routeFormat {
 			"multipart/form-data（文件 / data URL / base64 / base64: 文本）",
 		},
 		Query: map[string]any{
-			"x":       "0..479，矩形左上角 X，默认 0",
-			"y":       "0..1919，矩形左上角 Y，默认 0",
+			"x":       "0..479，矩形左上角 X（局部刷新时用）",
+			"y":       "0..1919，矩形左上角 Y（局部刷新时用）",
 			"aliases": []string{"position_X", "position_Y"},
 		},
 		Notes: []string{
+			"不带坐标：整屏自适应。按宽高比判断方向，竖图保持 native，横图按 landscape 旋转；长边缩放到 1920，短边居中裁剪填满",
+			"带坐标（x / y）：原生局部刷新，图片超出 480x1920 自动裁剪，完全不可见才报错",
 			"坐标通过 query string 传递",
-			"图片超出 480x1920 自动裁剪，完全不可见才报错",
 			"multipart 多字段时按读取顺序取第一个能解码成图片的字段",
 		},
 	}
@@ -290,18 +293,31 @@ func handleRPC(service *screenService, w http.ResponseWriter, r *http.Request) {
 func handleImageUpload(service *screenService, w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 
+	img, err := readUploadedImage(r)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, rpcResponse{OK: false, Action: "image", Error: err.Error(), Status: service.status()})
+		return
+	}
+
+	// No coordinates: auto-fit the whole screen. Aspect ratio decides orientation,
+	// the long edge is scaled to 1920 and the short edge is center-cropped to fill.
+	if !hasAnyQuery(r, "x", "y", "position_X", "position_x", "position_Y", "position_y") {
+		orientation, err := service.displayAutoFitImage(img)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, rpcResponse{OK: false, Action: "image", Error: err.Error(), Status: service.status()})
+			return
+		}
+		writeJSON(w, http.StatusOK, rpcResponse{OK: true, Action: "image", Message: "image fitted and sent (" + orientation.String() + ")", Status: service.status()})
+		return
+	}
+
+	// Coordinates given: keep the native partial-update behavior.
 	x, err := parseImageQueryInt(r, 0, "x", "position_X", "position_x")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, rpcResponse{OK: false, Action: "image", Error: err.Error(), Status: service.status()})
 		return
 	}
 	y, err := parseImageQueryInt(r, 0, "y", "position_Y", "position_y")
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, rpcResponse{OK: false, Action: "image", Error: err.Error(), Status: service.status()})
-		return
-	}
-
-	img, err := readUploadedImage(r)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, rpcResponse{OK: false, Action: "image", Error: err.Error(), Status: service.status()})
 		return
@@ -677,6 +693,37 @@ func (s *screenService) displayNativeImage(img image.Image, x, y int) error {
 	})
 }
 
+// displayAutoFitImage picks portrait/landscape from the aspect ratio, scales the
+// long edge to 1920 and center-crops the short edge to fill the screen, then does a
+// full refresh. Portrait keeps the native orientation (no rotation); landscape sets
+// the orientation to landscape so the driver rotates the 1920x480 frame to native.
+func (s *screenService) displayAutoFitImage(img image.Image) (turing88.Orientation, error) {
+	w, h := imageSizeOf(img)
+
+	orientation := turing88.ReversePortrait // native, no rotation
+	targetW, targetH := turing88.NativeWidth, turing88.NativeHeight
+	if w > h {
+		orientation = turing88.Landscape
+		targetW, targetH = turing88.NativeHeight, turing88.NativeWidth // 1920x480 landscape frame
+	}
+	fitted := coverFitCenter(img, targetW, targetH)
+
+	err := s.withDriver(func(d *turing88.Driver) error {
+		if s.orientation != orientation {
+			if err := d.SetOrientation(orientation); err != nil {
+				return err
+			}
+			s.orientation = orientation
+		}
+		if err := d.DisplayImage(fitted, 0, 0); err != nil {
+			return err
+		}
+		s.updatedAt = time.Now()
+		return nil
+	})
+	return orientation, err
+}
+
 func (s *screenService) withDriver(fn func(*turing88.Driver) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -983,4 +1030,38 @@ func parseImageQueryInt(r *http.Request, fallback int, names ...string) (int, er
 func imageSizeOf(img image.Image) (int, int) {
 	b := img.Bounds()
 	return b.Dx(), b.Dy()
+}
+
+func hasAnyQuery(r *http.Request, names ...string) bool {
+	query := r.URL.Query()
+	for _, name := range names {
+		for _, value := range query[name] {
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// coverFitCenter scales src so it fully covers targetW x targetH (long edge first),
+// then center-crops the overflow. The result is exactly targetW x targetH.
+func coverFitCenter(src image.Image, targetW, targetH int) image.Image {
+	dst := image.NewRGBA(image.Rect(0, 0, targetW, targetH))
+	b := src.Bounds()
+	sw, sh := b.Dx(), b.Dy()
+	if sw <= 0 || sh <= 0 || targetW <= 0 || targetH <= 0 {
+		return dst
+	}
+
+	scale := math.Max(float64(targetW)/float64(sw), float64(targetH)/float64(sh))
+	scaledW := maxInt(targetW, int(math.Round(float64(sw)*scale)))
+	scaledH := maxInt(targetH, int(math.Round(float64(sh)*scale)))
+
+	scaled := image.NewRGBA(image.Rect(0, 0, scaledW, scaledH))
+	xdraw.CatmullRom.Scale(scaled, scaled.Bounds(), src, b, draw.Src, nil)
+
+	offset := image.Point{X: (scaledW - targetW) / 2, Y: (scaledH - targetH) / 2}
+	draw.Draw(dst, dst.Bounds(), scaled, offset, draw.Src)
+	return dst
 }
