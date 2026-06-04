@@ -1,0 +1,16 @@
+# Local test artifacts, captures and server logs
+/tmp/
+
+# Go build output
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
