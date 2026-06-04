@@ -144,18 +144,21 @@ func runServer(listen, pipeName, unixSocketPath, port string, brightness int, or
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
-			"name":          "turing88 driver",
-			"local_rpc":     localRPCEndpoint,
-			"http_rpc":      "POST /rpc",
-			"http_image":    "POST /image",
-			"websocket_rpc": "GET /rpc",
-			"status":        "GET /status",
-			"ports":         "GET /ports",
+			"name":      "turing88 driver",
+			"local_rpc": localRPCEndpoint,
+			"rpc":       "POST /rpc | WebSocket /rpc（GET /rpc 返回请求格式）",
+			"image":     "POST /image（GET /image 返回请求格式）",
+			"status":    "GET /status",
+			"ports":     "GET /ports",
 		})
 	})
 	mux.HandleFunc("/rpc", func(w http.ResponseWriter, r *http.Request) {
 		if websocket.IsWebSocketUpgrade(r) {
 			handleWebSocket(service, w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, rpcRouteFormat())
 			return
 		}
 		if r.Method != http.MethodPost {
@@ -165,6 +168,10 @@ func runServer(listen, pipeName, unixSocketPath, port string, brightness int, or
 		handleRPC(service, w, r)
 	})
 	mux.HandleFunc("/image", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			writeJSON(w, http.StatusOK, imageRouteFormat())
+			return
+		}
 		if r.Method != http.MethodPost {
 			writeJSON(w, http.StatusMethodNotAllowed, rpcResponse{OK: false, Error: "use POST /image"})
 			return
@@ -195,6 +202,72 @@ func runServer(listen, pipeName, unixSocketPath, port string, brightness int, or
 	}
 	fmt.Printf("listening on http://%s\n", httpEndpoint)
 	return http.Serve(httpListener, mux)
+}
+
+// routeFormat 描述某个 HTTP 路由的请求格式，GET 该路由时返回它，作为自说明文档。
+type routeFormat struct {
+	OK          bool           `json:"ok"`
+	Route       string         `json:"route"`
+	Methods     []string       `json:"methods"`
+	ContentType []string       `json:"content_type,omitempty"`
+	Query       map[string]any `json:"query,omitempty"`
+	Request     map[string]any `json:"request,omitempty"`
+	Actions     []string       `json:"actions,omitempty"`
+	Notes       []string       `json:"notes,omitempty"`
+}
+
+func rpcRouteFormat() routeFormat {
+	return routeFormat{
+		OK:          true,
+		Route:       "/rpc",
+		Methods:     []string{"POST", "WebSocket"},
+		ContentType: []string{"application/json"},
+		Request: map[string]any{
+			"action":      "",
+			"port":        "",
+			"brightness":  "",
+			"orientation": "",
+			"image":       "",
+			"position_X":  "",
+			"position_Y":  "",
+			"color":       "",
+			"reset":       "",
+		},
+		Actions: []string{
+			"status", "ports", "list", "init", "reconnect",
+			"on", "off", "brightness", "clear",
+			"show", "full", "update", "rect",
+		},
+		Notes: []string{
+			"字段可缺失或传空字符串，空字段不覆盖当前状态",
+			"action 为空等同 status",
+			"show 需要 480x1920 整图；update 局部刷新，越界自动裁剪",
+			"WebSocket 同地址 ws://<host>/rpc，每条消息发送一段 JSON",
+		},
+	}
+}
+
+func imageRouteFormat() routeFormat {
+	return routeFormat{
+		OK:      true,
+		Route:   "/image",
+		Methods: []string{"POST"},
+		ContentType: []string{
+			"application/octet-stream（原始图片二进制）",
+			"image/png, image/jpeg",
+			"multipart/form-data（文件 / data URL / base64 / base64: 文本）",
+		},
+		Query: map[string]any{
+			"x":       "0..479，矩形左上角 X，默认 0",
+			"y":       "0..1919，矩形左上角 Y，默认 0",
+			"aliases": []string{"position_X", "position_Y"},
+		},
+		Notes: []string{
+			"坐标通过 query string 传递",
+			"图片超出 480x1920 自动裁剪，完全不可见才报错",
+			"multipart 多字段时按读取顺序取第一个能解码成图片的字段",
+		},
+	}
 }
 
 func handleRPC(service *screenService, w http.ResponseWriter, r *http.Request) {

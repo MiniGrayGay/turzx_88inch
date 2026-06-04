@@ -130,6 +130,14 @@ HTTP POST 保留为调试入口。
 
 默认 HTTP 端口是 `60880`。如果该端口已被占用，服务会自动尝试 `60879`、`60878`，直到找到可用端口；启动日志会输出实际监听地址。
 
+对 `POST` 路由发 `GET` 请求会返回该路由的请求格式（自说明，不执行任何屏幕动作）：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:60880/rpc      # 返回 JSON RPC 字段、动作列表、说明
+Invoke-RestMethod http://127.0.0.1:60880/image    # 返回支持的 Content-Type、query 坐标、裁剪规则
+Invoke-RestMethod http://127.0.0.1:60880/          # 返回路由索引
+```
+
 状态查询：
 
 ```powershell
