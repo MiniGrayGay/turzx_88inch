@@ -2,6 +2,7 @@
 /tmp/
 
 # Go build output
+/bin/
 *.exe
 *.exe~
 *.dll

@@ -32,19 +32,56 @@ height = 1920
 go/
   go.mod
   go.sum
+  .gitignore
   README.md
   project.md
-  cmd/turing88/main.go
-  cmd/turing88/server.go
-  turing88/driver.go
-  tmp/
+  cmd/turing88/
+    main.go                 CLI 入口，同时默认启动常驻服务
+    server.go               常驻 JSON RPC 服务
+    default_splash.go       gzip + base64 内嵌的默认开机画面 BGRA
+    default_splash_test.go
+    local_rpc_windows.go    Windows Named Pipe 入口（build tag: windows）
+    local_rpc_unix.go       Linux / 非 Windows Unix socket 入口
+    server_test.go
+  turing88/
+    driver.go               串口协议驱动
+    driver_test.go
+  tools/
+    generate_default_splash/main.go   离线生成 default_splash.go 的工具
+  tmp/                       本地测试图片 / 日志（已 gitignore）
+  bin/                       交叉编译输出（已 gitignore）
 ```
 
-`turing88/driver.go` 是串口协议驱动。
+`turing88/driver.go` 是串口协议驱动。对外只暴露原生竖屏入口 `DisplayNativeImage` / `DisplayNativeBGRA`，以及保留给旧 CLI 的带旋转入口 `DisplayImage`。
 
 `cmd/turing88/server.go` 是常驻 JSON RPC 服务，负责 HTTP/WebSocket 调试入口和本机 IPC 调用入口。
 
+`cmd/turing88/local_rpc_windows.go` 与 `cmd/turing88/local_rpc_unix.go` 通过 build tag 区分平台：Windows 注册 Named Pipe，其余平台注册 Unix socket。
+
 `cmd/turing88/main.go` 保留旧 CLI 调试入口，同时默认启动服务。
+
+`tools/generate_default_splash/main.go` 是离线工具：把根目录 `4_1.png` 缩放、转码后重新生成 `cmd/turing88/default_splash.go`。常规运行不需要它。
+
+## 构建与交叉编译
+
+驱动只依赖纯 Go 的 `go.bug.st/serial` 和 `gorilla/websocket`，没有 cgo 依赖，所以可以关掉 cgo 做静态交叉编译，编出来的二进制不依赖目标机上的任何动态库。
+
+体积优化约定：
+
+```text
+CGO_ENABLED=0            关闭 cgo，静态链接，便于跨机分发
+-trimpath                去掉二进制里的绝对路径，减小体积并提升可复现性
+-ldflags="-s -w"         去掉符号表（-s）和 DWARF 调试信息（-w）
+```
+
+不使用 UPX 压缩。当前两个目标的产物大约：
+
+```text
+bin/turing88-windows-amd64.exe   约 10.2 MB
+bin/turing88-linux-amd64         约 9.9 MB
+```
+
+输出统一放在 `bin/`，该目录已在 `.gitignore` 中忽略，不会被提交。具体命令见 `README.md` 的“构建二进制”一节。
 
 ## 常驻服务模式
 

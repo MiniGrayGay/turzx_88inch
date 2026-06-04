@@ -234,15 +234,89 @@ B, G, R, A
 
 ## 调试 CLI
 
-旧的一次性 CLI 入口仍保留用于调试：
+旧的一次性 CLI 入口仍保留用于调试。`-action` 默认是 `serve`（启动常驻服务），其余动作每次都会单独打开并初始化串口：
 
 ```powershell
 go run .\cmd\turing88 -action list
-go run .\cmd\turing88 -action init -port AUTO
-go run .\cmd\turing88 -action show -port AUTO -image .\tmp\bgra-fullscreen-source.png
+go run .\cmd\turing88 -action init   -port AUTO
+go run .\cmd\turing88 -action show   -port AUTO -image .\tmp\bgra-fullscreen-source.png
+go run .\cmd\turing88 -action update -image .\tmp\small.png -x 120 -y 40
+go run .\cmd\turing88 -action clear  -color "#000000"
+go run .\cmd\turing88 -action off
+go run .\cmd\turing88 -action fps    -fps 5 -seconds 20
 ```
 
-常规使用建议走常驻服务，避免每次刷新都重新打开、初始化串口。
+可用动作：
+
+| `-action` | 说明 |
+| --- | --- |
+| `serve` | 启动常驻服务（默认） |
+| `list` | 列出串口 |
+| `init` | 打开并初始化屏幕后退出 |
+| `show` | 全屏刷新，需要 `-image`（走旧 `DisplayImage` 带旋转入口） |
+| `update` | 局部刷新，需要 `-image`，配合 `-x` / `-y` |
+| `clear` | 清屏，配合 `-color` |
+| `off` | 关闭屏幕 |
+| `fps` | 全屏动态刷新压测，配合 `-fps` / `-seconds` |
+
+常用命令行参数：
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `-port` | `AUTO` | 串口名或 `AUTO` |
+| `-image` | 空 | `show` / `update` 的图片路径 |
+| `-x` / `-y` | `0` | `update` 矩形左上角坐标 |
+| `-brightness` | `40` | 亮度 `0..100` |
+| `-orientation` | `native` | 方向；CLI 走带旋转入口，`native` 表示不旋转 |
+| `-color` | `#000000` | `clear` 的颜色 |
+| `-reset` | `false` | 初始化前先 `RESTART` 重启屏幕 |
+| `-fps` | `5` | `fps` 压测目标帧率 |
+| `-seconds` | `20` | `fps` 压测时长，`0` 表示一直运行 |
+| `-listen` / `-pipe` / `-unix-socket` | 见上文 | 仅 `serve` 使用 |
+
+常规使用建议走常驻服务，避免每次刷新都重新打开、初始化串口。CLI 的 `show` / `update` / `clear` 走的是带旋转的旧入口；常驻服务走的是原生 `480x1920` 入口，两者在 `native` 方向下结果一致。
+
+## 构建二进制
+
+驱动没有 cgo 依赖，可以关掉 cgo 做静态交叉编译，产物不依赖目标机的动态库。统一输出到 `bin/`（已 gitignore）。
+
+体积优化参数：`-trimpath` 去掉绝对路径，`-ldflags="-s -w"` 去掉符号表与调试信息。不使用 UPX。
+
+PowerShell（Windows 本机交叉编译两个目标）：
+
+```powershell
+$env:CGO_ENABLED = "0"
+$env:GOARCH = "amd64"
+
+$env:GOOS = "windows"
+go build -trimpath -ldflags="-s -w" -o bin/turing88-windows-amd64.exe ./cmd/turing88
+
+$env:GOOS = "linux"
+go build -trimpath -ldflags="-s -w" -o bin/turing88-linux-amd64 ./cmd/turing88
+
+Remove-Item Env:\GOOS, Env:\GOARCH, Env:\CGO_ENABLED
+```
+
+bash / Linux / macOS：
+
+```bash
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/turing88-windows-amd64.exe ./cmd/turing88
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+  go build -trimpath -ldflags="-s -w" -o bin/turing88-linux-amd64 ./cmd/turing88
+```
+
+产物大约 10 MB。运行方式和 `go run .\cmd\turing88` 完全一致，例如：
+
+```powershell
+.\bin\turing88-windows-amd64.exe -action list
+.\bin\turing88-windows-amd64.exe            # 默认启动常驻服务
+```
+
+```bash
+./bin/turing88-linux-amd64 -action list
+./bin/turing88-linux-amd64                  # 默认启动常驻服务，本机 RPC 入口为 /tmp/ct88inch.sock
+```
 
 ## 验证
 
